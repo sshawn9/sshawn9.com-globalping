@@ -2,7 +2,8 @@ import { appendFile, readFile, writeFile } from 'node:fs/promises';
 
 async function main() {
   const inputs = JSON.parse(process.env.PROBE_INPUTS);
-  if (!Number.isSafeInteger(inputs.max_parallel) || inputs.max_parallel < 1) {
+  const maxParallel = Number(inputs.max_parallel);
+  if (!Number.isSafeInteger(maxParallel) || maxParallel < 1) {
     throw new Error('max_parallel must be a positive integer.');
   }
 
@@ -38,7 +39,7 @@ async function main() {
   );
   if (process.env.GITHUB_OUTPUT) {
     const matrix = { batch: batches.map((batch) => batch.id) };
-    await appendFile(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\n`);
+    await appendFile(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\nmax_parallel=${maxParallel}\n`);
   }
   console.log(`${urls.length} resources, ${cities.size} cities, ${resourcesPerBatch} resources per runner, ${batches.length} batches.`);
 }
