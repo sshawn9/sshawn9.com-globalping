@@ -1,6 +1,9 @@
 name: Globalping
 
 on:
+  schedule:
+    - cron: '0 6 * * *'
+      timezone: Asia/Shanghai
   workflow_dispatch:
     inputs:
       CN-main:
@@ -40,7 +43,8 @@ jobs:
       - name: Prepare batches
         id: batches
         env:
-          PROBE_INPUTS: ${{ toJSON(inputs) }}
+          PROBE_INPUTS: >-
+            ${{ github.event_name == 'schedule' && '{"CN-main":true,"CN-aroung":true,"global-main":true,"max_parallel":12}' || toJSON(inputs) }}
         run: node probe/prepare-probe-batches.mjs
       - name: Resolve latest Globalping CLI
         id: cli
