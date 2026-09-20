@@ -60,24 +60,21 @@ async function main() {
   const cityResults = cities.map((city) => ({
     city, misses: resources.filter((resource) => !resource.hits.has(city)),
   }));
+  const totalPairs = resources.length * cities.length;
+  const hitPairs = resources.reduce((total, resource) => total + resource.hits.size, 0);
   const summary = [
     '# Globalping probe results\n',
     `${resources.length} resources × ${cities.length} cities.\n`,
+    `**HIT / total:** ${hitPairs}/${totalPairs} (${(hitPairs / totalPairs * 100).toFixed(2)}%) · **MISS:** ${totalPairs - hitPairs}\n`,
     'HIT requires HTTP **200** and **CF-Cache-Status: HIT**. Each resource/city pair counts once; any qualifying result makes it a HIT.\n',
     'MISS means no qualifying HIT, including HTTP errors, other cache statuses, failed probes, and missing results. Denominators use the complete planned lists.\n',
     'Resource IDs link to the URLs listed below.\n',
-    table('HIT by resource', ['ID', 'Resource URL', 'HIT cities / total cities'], resources.map((resource) => [
-      `[${resource.id}]`, `<code>${escape(resource.url)}</code>`, `${resource.hits.size}/${cities.length}`,
-    ])),
-    table('HIT by city', ['City', 'HIT resources / total resources'], cityResults.map(({ city, misses }) => [
-      escape(city), `${resources.length - misses.length}/${resources.length}`,
-    ])),
-    table('MISS by resource', ['Resource', 'MISS cities / total cities', 'Cities'], resourceMisses
-      .filter(({ misses }) => misses.length > 0)
-      .map(({ id, misses }) => [`[${id}]`, `${misses.length}/${cities.length}`, misses.map(escape).join(', ')])),
     table('MISS by city', ['City', 'MISS resources / total resources', 'Resources'], cityResults
       .filter(({ misses }) => misses.length > 0)
       .map(({ city, misses }) => [escape(city), `${misses.length}/${resources.length}`, misses.map(({ id }) => `[${id}]`).join(', ')])),
+    table('MISS by resource', ['ID', 'Resource URL', 'MISS cities / total cities', 'Cities'], resourceMisses
+      .filter(({ misses }) => misses.length > 0)
+      .map(({ id, url, misses }) => [`[${id}]`, `<code>${escape(url)}</code>`, `${misses.length}/${cities.length}`, misses.map(escape).join(', ')])),
     ...resources.map(({ id, url }) => `[${id}]: <${new URL(url).href}>`),
     '',
   ].join('\n');
