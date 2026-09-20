@@ -1,0 +1,123 @@
+name: Globalping
+
+on:
+  workflow_dispatch:
+    inputs:
+      CN-main:
+        description: CN-main
+        type: boolean
+        default: true
+      CN-aroung:
+        description: CN-aroung
+        type: boolean
+        default: false
+      global-main:
+        description: global-main
+        type: boolean
+        default: false
+      max_parallel:
+        description: Maximum concurrent probe runners
+        type: number
+        default: 12
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.batches.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Fetch resources
+        run: node probe/fetch-resource-urls.mjs
+      - name: Prepare batches
+        id: batches
+        env:
+          PROBE_INPUTS: ${{ toJSON(inputs) }}
+        run: node probe/prepare-probe-batches.mjs
+      - name: Resolve latest Globalping CLI
+        id: cli
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CLI_VERSION=$(gh release view --repo jsdelivr/globalping-cli --json tagName --jq .tagName)
+          echo "version=$CLI_VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        id: cli-cache
+        with:
+          path: probe/bin
+          key: globalping-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.cli.outputs.version }}
+      - name: Download Globalping CLI
+        if: steps.cli-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_VERSION: ${{ steps.cli.outputs.version }}
+        run: |
+          gh release download "$CLI_VERSION" --repo jsdelivr/globalping-cli --pattern globalping_Linux_x86_64.tar.gz --output "$RUNNER_TEMP/globalping.tar.gz"
+          tar -xzf "$RUNNER_TEMP/globalping.tar.gz" -C "$RUNNER_TEMP" globalping
+          install -D -m 755 "$RUNNER_TEMP/globalping" probe/bin/globalping-cli
+      - uses: actions/upload-artifact@v7
+        with:
+          name: probe-inputs
+          path: |
+            probe/resources/*.json
+            probe/bin/globalping-cli
+          if-no-files-found: error
+
+  probe:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max_parallel }}
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v8
+        with:
+          name: probe-inputs
+          path: probe
+      - name: Enable Globalping CLI
+        run: |
+          chmod +x probe/bin/globalping-cli
+          echo "$GITHUB_WORKSPACE/probe/bin" >> "$GITHUB_PATH"
+      - name: Probe resource batch
+        env:
+          BATCH_ID: ${{ matrix.batch }}
+        run: node probe/probe-resource-batch.mjs "$BATCH_ID"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: probe-results-${{ matrix.batch }}
+          path: probe/results/*.json
+
+  collect:
+    needs: [prepare, probe]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v8
+        with:
+          name: probe-inputs
+          path: probe
+      - name: Collect all probe results
+        uses: actions/download-artifact@v8
+        with:
+          pattern: probe-results-*
+          path: probe/collected-results
+      - name: Summarize probe results
+        if: ${{ !cancelled() }}
+        run: node probe/summarize-probe-results.mjs
