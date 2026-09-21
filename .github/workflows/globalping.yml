@@ -23,6 +23,15 @@ on:
         type: number
         default: 12
         required: true
+      max_rounds:
+        description: Maximum probe rounds
+        type: number
+        default: 5
+        required: true
+      previous_run_id:
+        description: Internal continuation input; leave empty for a new task
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -30,24 +39,38 @@ permissions:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       matrix: ${{ steps.batches.outputs.matrix }}
       max_parallel: ${{ steps.batches.outputs.max_parallel }}
+      round: ${{ steps.batches.outputs.round }}
+      has_work: ${{ steps.batches.outputs.has_work }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
+      - name: Restore cumulative results
+        if: inputs.previous_run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: probe-state
+          run-id: ${{ inputs.previous_run_id }}
+          github-token: ${{ github.token }}
+          path: probe
       - name: Fetch resources
         run: node probe/fetch-resource-urls.mjs
       - name: Prepare batches
         id: batches
         env:
           PROBE_INPUTS: >-
-            ${{ github.event_name == 'schedule' && '{"CN-main":true,"CN-aroung":true,"global-main":true,"max_parallel":12}' || toJSON(inputs) }}
+            ${{ github.event_name == 'schedule' && '{"CN-main":true,"CN-aroung":true,"global-main":true,"max_parallel":12,"max_rounds":5}' || toJSON(inputs) }}
         run: node probe/prepare-probe-batches.mjs
       - name: Resolve latest Globalping CLI
         id: cli
+        if: steps.batches.outputs.has_work == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -55,11 +78,12 @@ jobs:
           echo "version=$CLI_VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v6
         id: cli-cache
+        if: steps.batches.outputs.has_work == 'true'
         with:
           path: probe/bin
           key: globalping-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.cli.outputs.version }}
       - name: Download Globalping CLI
-        if: steps.cli-cache.outputs.cache-hit != 'true'
+        if: steps.batches.outputs.has_work == 'true' && steps.cli-cache.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_VERSION: ${{ steps.cli.outputs.version }}
@@ -77,6 +101,7 @@ jobs:
 
   probe:
     needs: prepare
+    if: needs.prepare.outputs.has_work == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -96,6 +121,7 @@ jobs:
           chmod +x probe/bin/globalping-cli
           echo "$GITHUB_WORKSPACE/probe/bin" >> "$GITHUB_PATH"
       - name: Probe resource batch
+        continue-on-error: true
         env:
           BATCH_ID: ${{ matrix.batch }}
         run: node probe/probe-resource-batch.mjs "$BATCH_ID"
@@ -109,20 +135,50 @@ jobs:
     needs: [prepare, probe]
     if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
+      - name: Restore cumulative results
+        if: inputs.previous_run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: probe-state
+          run-id: ${{ inputs.previous_run_id }}
+          github-token: ${{ github.token }}
+          path: probe
       - uses: actions/download-artifact@v8
         with:
           name: probe-inputs
           path: probe
       - name: Collect all probe results
+        if: needs.prepare.outputs.has_work == 'true'
         uses: actions/download-artifact@v8
         with:
           pattern: probe-results-*
-          path: probe/collected-results
+          path: probe/collected-results/round-${{ needs.prepare.outputs.round }}
+      - name: Complete probe round
+        id: round
+        run: node probe/complete-probe-round.mjs
+      - name: Save cumulative results for the next round
+        if: steps.round.outputs.continue == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: probe-state
+          path: |
+            probe/resources/*.json
+            probe/collected-results/**/*.json
+          if-no-files-found: error
+      - name: Start next round
+        if: steps.round.outputs.continue == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT_ROUND: ${{ steps.round.outputs.next_round }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/globalping.yml/dispatches" --input - <<< "$NEXT_ROUND"
       - name: Summarize probe results
-        if: ${{ !cancelled() }}
+        if: steps.round.outputs.continue == 'false'
         run: node probe/summarize-probe-results.mjs
