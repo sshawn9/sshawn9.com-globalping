@@ -172,6 +172,7 @@ jobs:
           path: |
             probe/resources/*.json
             probe/collected-results/**/*.json
+            probe/rounds/*.json
           if-no-files-found: error
       - name: Start next round
         if: steps.round.outputs.continue == 'true'
@@ -182,3 +183,24 @@ jobs:
       - name: Summarize probe results
         if: steps.round.outputs.continue == 'false'
         run: node probe/summarize-probe-results.mjs
+      - name: Show overview
+        if: steps.round.outputs.continue == 'false'
+        run: cat probe/summary/overview.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Show round progress
+        if: steps.round.outputs.continue == 'false'
+        run: cat probe/summary/rounds.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Show missing resources by city
+        if: steps.round.outputs.continue == 'false'
+        run: cat probe/summary/missing-cities.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Show missing cities by resource
+        if: steps.round.outputs.continue == 'false'
+        run: cat probe/summary/missing-resources.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Show Cloudflare colos
+        if: steps.round.outputs.continue == 'false'
+        run: cat probe/summary/colos.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Show probe sources
+        if: steps.round.outputs.continue == 'false'
+        run: cat probe/summary/sources.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Show probe runners
+        if: steps.round.outputs.continue == 'false'
+        run: cat probe/summary/runners.md >> "$GITHUB_STEP_SUMMARY"

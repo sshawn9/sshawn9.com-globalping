@@ -15,12 +15,12 @@ async function runBatch(t, { mode = 'success', quota = 250, resourceCount = 2, c
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'resources'));
   await mkdir(join(root, 'bin'));
-  for (const file of ['probe-resource.mjs', 'probe-resource-batch.mjs', 'read-resource-hits.mjs']) {
+  for (const file of ['probe-resource.mjs', 'probe-resource-batch.mjs', 'read-resource-hits.mjs', 'read-probe-results.mjs']) {
     await cp(join(source, file), join(root, file));
   }
   const urls = Array.from({ length: resourceCount }, (_, i) => `https://example.com/resource-${i}.css`);
   const cities = Array.from({ length: cityCount }, (_, i) => `US+City ${i}`);
-  await writeFile(join(root, 'resources/probe-batches.json'), JSON.stringify({ cities, batches: [{ id: 1, urls }] }));
+  await writeFile(join(root, 'resources/probe-batches.json'), JSON.stringify({ round: 1, cities, batches: [{ id: 1, urls }] }));
   await writeFile(join(root, 'mock-ip.mjs'), `
 import assert from 'node:assert/strict';
 import { appendFileSync, readFileSync } from 'node:fs';
@@ -79,7 +79,7 @@ for (const mode of ['mixed', 'all-failed']) {
     assert.deepEqual(calls.map((call) => call.stats.attempted_records), [5, 7, 12, 14]);
     assert.deepEqual(calls.map((call) => call.stats.attempted_resources), [1, 1, 2, 2]);
     assert.deepEqual(calls.map((call) => Number(call.args[call.args.indexOf('--limit') + 1])), [5, 2, 5, 2]);
-    assert.deepEqual(stats, { public_ip: publicIP, available_quota: 250, assigned_resources: 2, attempted_resources: 2, attempted_records: 14 });
+    assert.deepEqual(stats, { round: 1, batch_id: 1, public_ip: publicIP, available_quota: 250, assigned_resources: 2, attempted_resources: 2, attempted_records: 14 });
     const records = (await readdir(join(root, 'results'))).filter((name) => name !== 'probe-stats.json');
     assert.equal(records.length, mode === 'mixed' ? 1 : 0);
     if (records.length) assert.equal(await readFile(join(root, 'results', records[0]), 'utf8'), raw);
@@ -93,7 +93,7 @@ for (const mode of ['mixed', 'all-failed']) {
 test('220 remaining tests and 50 cities only permit the first four of five assigned resources', async (t) => {
   const { urls, result, stats, calls } = await runBatch(t, { quota: 220, cityCount: 50, resourceCount: 5 });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(stats, { public_ip: publicIP, available_quota: 220, assigned_resources: 5, attempted_resources: 4, attempted_records: 200 });
+  assert.deepEqual(stats, { round: 1, batch_id: 1, public_ip: publicIP, available_quota: 220, assigned_resources: 5, attempted_resources: 4, attempted_records: 200 });
   assert.deepEqual([...new Set(calls.map((call) => call.args[1]))], urls.slice(0, 4));
   assert.equal(calls.length, 40);
 });
@@ -102,7 +102,7 @@ for (const quota of [0, 6]) {
   test(`saves zero actual probes and exits successfully when quota ${quota} cannot cover one resource`, async (t) => {
     const { result, stats, calls } = await runBatch(t, { quota });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(stats, { public_ip: publicIP, available_quota: quota, assigned_resources: 2, attempted_resources: 0, attempted_records: 0 });
+    assert.deepEqual(stats, { round: 1, batch_id: 1, public_ip: publicIP, available_quota: quota, assigned_resources: 2, attempted_resources: 0, attempted_records: 0 });
     assert.equal(calls.length, 0);
   });
 }
@@ -111,7 +111,7 @@ for (const mode of ['ip-error', 'limits-error', 'limits-invalid']) {
   test(`preserves partial statistics and does not assume a quota after ${mode}`, async (t) => {
     const { result, stats, calls } = await runBatch(t, { mode });
     assert.equal(result.status, 1);
-    assert.deepEqual(stats, { public_ip: mode === 'ip-error' ? null : publicIP, available_quota: null, assigned_resources: 2, attempted_resources: 0, attempted_records: 0 });
+    assert.deepEqual(stats, { round: 1, batch_id: 1, public_ip: mode === 'ip-error' ? null : publicIP, available_quota: null, assigned_resources: 2, attempted_resources: 0, attempted_records: 0 });
     assert.equal(calls.length, 0);
   });
 }

@@ -11,6 +11,8 @@ async function main() {
   if (!batch) throw new Error('Batch not found.');
 
   const stats = {
+    round: plan.round,
+    batch_id: batch.id,
     public_ip: null,
     available_quota: null,
     assigned_resources: batch.urls.length,

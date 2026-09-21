@@ -1,8 +1,11 @@
-import { appendFile, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { readResourceHits } from './read-resource-hits.mjs';
 
 async function main() {
   const plan = JSON.parse(await readFile(new URL('./resources/probe-batches.json', import.meta.url), 'utf8'));
+  const rounds = new URL('./rounds/', import.meta.url);
+  await mkdir(rounds, { recursive: true });
+  await writeFile(new URL(`round-${plan.round}.json`, rounds), JSON.stringify(plan, null, 2) + '\n');
   const resources = await readResourceHits(plan.urls, plan.cities);
   const pending = resources.filter((resource) => resource.hits.size < plan.cities.length);
   const continueRounds = pending.length > 0 && plan.round < plan.inputs.max_rounds;

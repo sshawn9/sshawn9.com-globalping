@@ -22,6 +22,7 @@ async function fixture(t, previous) {
   }
   if (previous) {
     await cp(join(previous, 'resources'), join(probe, 'resources'), { recursive: true });
+    await cp(join(previous, 'rounds'), join(probe, 'rounds'), { recursive: true });
     await cp(join(previous, 'collected-results'), join(probe, 'collected-results'), { recursive: true });
   }
   await writeFile(join(root, 'cities/CN-main.json'), JSON.stringify(cities));
@@ -72,7 +73,7 @@ test('accumulates HITs across fresh runners, skips complete resources, and summa
   assert.equal(continuation.continue, 'true');
   const dispatch = JSON.parse(continuation.next_round);
   assert.deepEqual(dispatch, { ref: 'main', inputs: { ...inputs, max_parallel: 12, max_rounds: 5, previous_run_id: '12345' } });
-  await assert.rejects(readFile(join(first.root, 'summary.md')), { code: 'ENOENT' });
+  await assert.rejects(readFile(join(first.probe, 'probe-summary.md')), { code: 'ENOENT' });
 
   const second = await fixture(t, first.probe);
   const next = await second.run('prepare-probe-batches.mjs', dispatch.inputs);
@@ -87,11 +88,11 @@ test('accumulates HITs across fresh runners, skips complete resources, and summa
   assert.equal(done.continue, 'false');
   assert.equal(done.next_round, undefined);
   await second.run('summarize-probe-results.mjs');
-  const summary = await readFile(join(second.root, 'summary.md'), 'utf8');
-  assert.match(summary, /3 resources × 2 cities/);
+  const summary = await readFile(join(second.probe, 'probe-summary.md'), 'utf8');
+  assert.match(summary, /Cities \/ selected groups \| 2 \//);
   assert.match(summary, /6\/6 \(100\.00%\)/);
-  assert.match(summary, /MISS by city\n\nNone/);
-  assert.match(summary, /MISS by resource\n\nNone/);
+  assert.match(summary, /MISS by city\n\nAll resources hit/);
+  assert.match(summary, /MISS by resource\n\nAll cities hit/);
   assert.deepEqual(await readFile(join(second.probe, 'collected-results/round-1/probe-results-1/0.json')), originalBytes);
   assert.deepEqual(await readdir(join(second.probe, 'collected-results')), ['round-1', 'round-2']);
 
@@ -111,9 +112,9 @@ test('stops at the round limit while preserving failed and missing pairs in the 
   await state.result(2, 0, [[cities[0], 500, 'HIT'], [cities[1], 200, 'MISS']]);
   assert.equal((await state.run('complete-probe-round.mjs')).continue, 'false');
   await state.run('summarize-probe-results.mjs');
-  const summary = await readFile(join(state.root, 'summary.md'), 'utf8');
+  const summary = await readFile(join(state.probe, 'probe-summary.md'), 'utf8');
   assert.match(summary, /1\/6 \(16\.67%\)/);
-  assert.match(summary, /\*\*MISS:\*\* 5/);
+  assert.match(summary, /\| CN\+Shanghai \| 2\/3 \|/);
   await assert.rejects(state.run('prepare-probe-batches.mjs', next), /maximum number of rounds/);
 });
 
