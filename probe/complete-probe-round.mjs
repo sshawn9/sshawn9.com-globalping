@@ -13,7 +13,12 @@ async function main() {
   if (continueRounds) {
     const nextRound = {
       ref: process.env.GITHUB_REF_NAME,
-      inputs: { ...plan.inputs, previous_run_id: process.env.GITHUB_RUN_ID },
+      inputs: {
+        ...plan.inputs,
+        max_parallel: String(plan.inputs.max_parallel),
+        max_rounds: String(plan.inputs.max_rounds),
+        previous_run_id: process.env.GITHUB_RUN_ID,
+      },
     };
     output += `next_round=${JSON.stringify(nextRound)}\n`;
   }

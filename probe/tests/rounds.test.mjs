@@ -72,13 +72,18 @@ test('accumulates HITs across fresh runners, skips complete resources, and summa
   const continuation = await first.run('complete-probe-round.mjs');
   assert.equal(continuation.continue, 'true');
   const dispatch = JSON.parse(continuation.next_round);
-  assert.deepEqual(dispatch, { ref: 'main', inputs: { ...inputs, max_parallel: 12, max_rounds: 5, previous_run_id: '12345' } });
+  // The dispatch API expects numeric inputs as strings, despite their workflow type.
+  assert.deepEqual(dispatch, { ref: 'main', inputs: { ...inputs, previous_run_id: '12345' } });
+  assert.equal((await first.plan()).inputs.max_parallel, 12);
+  assert.equal((await first.plan()).inputs.max_rounds, 5);
   await assert.rejects(readFile(join(first.probe, 'probe-summary.md')), { code: 'ENOENT' });
 
   const second = await fixture(t, first.probe);
   const next = await second.run('prepare-probe-batches.mjs', dispatch.inputs);
   const nextPlan = await second.plan();
   assert.equal(next.round, '2');
+  assert.equal(next.max_parallel, '12');
+  assert.equal(nextPlan.inputs.max_rounds, 5);
   assert.deepEqual(nextPlan.urls, urls);
   assert.deepEqual(nextPlan.cities, cities);
   assert.deepEqual(nextPlan.batches.flatMap((batch) => batch.urls), urls.slice(1));
