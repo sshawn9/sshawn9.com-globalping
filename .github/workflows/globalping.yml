@@ -164,8 +164,7 @@ jobs:
       - name: Complete probe round
         id: round
         run: node probe/complete-probe-round.mjs
-      - name: Save cumulative results for the next round
-        if: steps.round.outputs.continue == 'true'
+      - name: Save cumulative probe state
         uses: actions/upload-artifact@v7
         with:
           name: probe-state
