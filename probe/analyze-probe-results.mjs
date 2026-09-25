@@ -157,7 +157,7 @@ export async function analyzeProbeResults(directory = new URL('./', import.meta.
   return {
     overview: {
       resourceCount: resources.length, cityCount: cityList.length, groups: sorted(groups),
-      roundCount: plans.length, maxRounds: plans[0].inputs.max_rounds, runnerCount: runners.size,
+      roundCount: plans.length, maxRounds: plans.at(-1).inputs.max_rounds, runnerCount: runners.size,
       coloCount: colos.size, hitRecords, hitCityPairs: seenCityPairs.size, totalCityPairs: resources.length * cityList.length,
       attemptedRecords: missingRunnerStats.length ? null : sum(roundRows, 'knownAttemptedRecords'),
       knownAttemptedRecords: sum(roundRows, 'knownAttemptedRecords'),

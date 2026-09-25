@@ -3,8 +3,9 @@ import { execFileSync } from 'node:child_process';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
+import { analyzeProbeResults } from '../analyze-probe-results.mjs';
 
 const source = fileURLToPath(new URL('../', import.meta.url));
 const urls = ['https://example.com/a.css?v=1', 'https://example.com/a.css?v=2', 'https://example.com/missing.js'];
@@ -129,6 +130,8 @@ test('validates round inputs and fails if continuation state is unavailable', as
     await assert.rejects(state.run('prepare-probe-batches.mjs', { ...inputs, max_rounds }), /max_rounds must/);
   }
   await assert.rejects(state.run('prepare-probe-batches.mjs', { ...inputs, previous_run_id: '999' }), /ENOENT/);
+  await assert.rejects(state.run('prepare-probe-batches.mjs', { ...inputs, history_run_id: '999' }), /ENOENT/);
+  await assert.rejects(state.run('prepare-probe-batches.mjs', { ...inputs, previous_run_id: '999', history_run_id: '888' }), /Set only one/);
   await state.run('prepare-probe-batches.mjs', { ...inputs, max_rounds: '1' });
   assert.equal((await state.run('complete-probe-round.mjs')).continue, 'false');
 });
@@ -141,4 +144,60 @@ test('prepares resource batches using a 250-test budget', async (t) => {
   const plan = await state.plan();
   assert.deepEqual(plan.batches.map((batch) => batch.urls.length), [125, 1]);
   assert.deepEqual(plan.batches.flatMap((batch) => batch.urls), inventory);
+});
+
+test('adds rounds to imported progress once and keeps all previous results and counters', async (t) => {
+  const saveStats = async (state, attempts) => {
+    const plan = await state.plan();
+    const directory = join(state.probe, 'collected-results', `round-${plan.round}`, 'probe-results-1');
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, 'probe-stats.json'), JSON.stringify({
+      round: plan.round, batch_id: 1, attempted_resources: plan.batches[0].urls.length,
+      attempted_records: attempts,
+    }));
+  };
+
+  const first = await fixture(t);
+  await first.run('prepare-probe-batches.mjs');
+  await first.result(1, 0, cities.map((city) => [city, 200, 'HIT']));
+  await saveStats(first, 6);
+  const next = JSON.parse((await first.run('complete-probe-round.mjs')).next_round).inputs;
+  const second = await fixture(t, first.probe);
+  await second.run('prepare-probe-batches.mjs', next);
+  await second.result(2, 1, [[cities[0], 200, 'HIT'], [cities[1], 200, 'MISS']]);
+  await saveStats(second, 4);
+  await second.run('complete-probe-round.mjs');
+
+  // Import after two rounds of a five-round plan: two more rounds end at four, not seven.
+  const imported = await fixture(t, second.probe);
+  const request = { ...inputs, history_run_id: '111', max_rounds: '2', max_parallel: '7' };
+  const start = await imported.run('prepare-probe-batches.mjs', request);
+  const plan = await imported.plan();
+  assert.equal(start.round, '3');
+  assert.equal(start.max_parallel, '7');
+  assert.equal(plan.inputs.max_rounds, 4);
+  assert.deepEqual(plan.batches.flatMap((batch) => batch.urls), urls.slice(1));
+  await imported.result(3, 1, [[cities[0], 200, 'MISS'], [cities[1], 200, 'HIT']]);
+  await saveStats(imported, 4);
+  const continuation = JSON.parse((await imported.run('complete-probe-round.mjs')).next_round).inputs;
+  assert.equal(continuation.max_rounds, '4');
+  assert.equal(continuation.previous_run_id, '12345');
+  assert.equal(continuation.history_run_id, undefined);
+
+  const last = await fixture(t, imported.probe);
+  assert.equal((await last.run('prepare-probe-batches.mjs', continuation)).round, '4');
+  assert.equal((await last.plan()).inputs.max_rounds, 4);
+  assert.deepEqual((await last.plan()).batches.flatMap((batch) => batch.urls), [urls[2]]);
+  // The last resource still has no result; the fixed round limit must stop the task.
+  await saveStats(last, 2);
+  assert.equal((await last.run('complete-probe-round.mjs')).continue, 'false');
+  const report = await analyzeProbeResults(pathToFileURL(`${last.probe}/`));
+  assert.equal(report.overview.roundCount, 4);
+  assert.equal(report.overview.maxRounds, 4);
+  assert.equal(report.overview.attemptedRecords, 16);
+  assert.equal(report.overview.hitRecords, 4);
+  assert.equal(report.overview.hitCityPairs, 4);
+  assert.equal(report.overview.totalCityPairs, 6);
+  assert.deepEqual(report.runners.map((r) => [r.id, r.attemptedRecords, r.hitRecords]),
+    [['1/1', 6, 2], ['2/1', 4, 1], ['3/1', 4, 1], ['4/1', 2, 0]]);
 });

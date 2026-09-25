@@ -3,23 +3,28 @@ import { readResourceHits } from './read-resource-hits.mjs';
 
 async function main() {
   const request = JSON.parse(process.env.PROBE_INPUTS);
+  if (request.previous_run_id && request.history_run_id) {
+    throw new Error('Set only one of previous_run_id and history_run_id.');
+  }
   const planFile = new URL('./resources/probe-batches.json', import.meta.url);
-  const previous = request.previous_run_id ? JSON.parse(await readFile(planFile, 'utf8')) : null;
-  const inputs = previous ? previous.inputs : request;
+  const previous = request.previous_run_id || request.history_run_id
+    ? JSON.parse(await readFile(planFile, 'utf8')) : null;
+  const inputs = request.previous_run_id ? previous.inputs : request;
   const maxParallel = Number(inputs.max_parallel);
   if (!Number.isSafeInteger(maxParallel) || maxParallel < 1) {
     throw new Error('max_parallel must be a positive integer.');
   }
-  const maxRounds = Number(inputs.max_rounds);
+  let maxRounds = Number(inputs.max_rounds);
   if (!Number.isSafeInteger(maxRounds) || maxRounds < 1) {
     throw new Error('max_rounds must be a positive integer.');
   }
+  if (request.history_run_id) maxRounds += previous.round;
   const round = previous ? previous.round + 1 : 1;
   if (round > maxRounds) throw new Error('The maximum number of rounds has already been reached.');
 
-  const cities = new Set(previous?.cities);
+  const cities = new Set(request.previous_run_id ? previous.cities : []);
   for (const group of ['CN-main', 'CN-aroung', 'global-main']) {
-    if (previous || inputs[group] !== true) continue;
+    if (request.previous_run_id || inputs[group] !== true) continue;
     const values = JSON.parse(await readFile(new URL(`../cities/${group}.json`, import.meta.url), 'utf8'));
     if (
       !Array.isArray(values) || values.length === 0 ||

@@ -24,12 +24,16 @@ on:
         default: 12
         required: true
       max_rounds:
-        description: Maximum probe rounds
+        description: Maximum probe rounds; additional rounds when history_run_id is set
         type: number
         default: 5
         required: true
+      history_run_id:
+        description: Import probe-state; run ID digits only (max_rounds adds more rounds)
+        type: string
+        default: ''
       previous_run_id:
-        description: Internal continuation input; leave empty for a new task
+        description: Continue with the saved round limit; run ID digits only
         type: string
         default: ''
 
@@ -53,11 +57,11 @@ jobs:
         with:
           node-version: '24'
       - name: Restore cumulative results
-        if: inputs.previous_run_id != ''
+        if: inputs.previous_run_id != '' || inputs.history_run_id != ''
         uses: actions/download-artifact@v8
         with:
           name: probe-state
-          run-id: ${{ inputs.previous_run_id }}
+          run-id: ${{ inputs.previous_run_id || inputs.history_run_id }}
           github-token: ${{ github.token }}
           path: probe
       - name: Fetch resources
@@ -144,11 +148,11 @@ jobs:
         with:
           node-version: '24'
       - name: Restore cumulative results
-        if: inputs.previous_run_id != ''
+        if: inputs.previous_run_id != '' || inputs.history_run_id != ''
         uses: actions/download-artifact@v8
         with:
           name: probe-state
-          run-id: ${{ inputs.previous_run_id }}
+          run-id: ${{ inputs.previous_run_id || inputs.history_run_id }}
           github-token: ${{ github.token }}
           path: probe
       - uses: actions/download-artifact@v8
