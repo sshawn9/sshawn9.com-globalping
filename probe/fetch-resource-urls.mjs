@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises';
 
-async function main() {
+export async function fetchResourceUrls() {
   const response = await fetch('https://sshawn9.com/resource-inventory.json', {
     headers: {
       Accept: 'application/json',
@@ -25,7 +25,9 @@ async function main() {
   console.log(`Saved resource inventory and ${urls.length} resource URLs to probe/resources/`);
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exitCode = 1;
-});
+if (import.meta.main) {
+  fetchResourceUrls().catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}

@@ -1,0 +1,47 @@
+name: Analyze probe state
+
+on:
+  workflow_call:
+    inputs: &state-inputs
+      state_run_id:
+        description: Source Run ID (the digits after /actions/runs/)
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs: *state-inputs
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Download probe state
+        uses: actions/download-artifact@v8
+        with:
+          name: probe-state
+          run-id: ${{ inputs.state_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/probe-state
+      - name: Analyze probe state
+        run: node probe/summarize-probe-results.mjs "$RUNNER_TEMP/probe-state"
+      - name: Show overview
+        run: cat probe/summary/overview.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Show round progress
+        run: cat probe/summary/rounds.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Show missing resources by city
+        run: cat probe/summary/missing-cities.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Show missing cities by resource
+        run: cat probe/summary/missing-resources.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Show Cloudflare colos
+        run: cat probe/summary/colos.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Show probe sources
+        run: cat probe/summary/sources.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Show probe runners
+        run: cat probe/summary/runners.md >> "$GITHUB_STEP_SUMMARY"

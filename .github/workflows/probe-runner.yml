@@ -1,0 +1,71 @@
+name: Probe runner
+
+on:
+  workflow_call:
+    inputs:
+      tasks_artifact:
+        description: Artifact in this run containing the task file
+        type: string
+        required: true
+      tasks_file:
+        description: Task JSON path relative to the artifact root
+        type: string
+        default: tasks.json
+      results_artifact:
+        description: Unique artifact name for this runner's results
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Download tasks
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.tasks_artifact }}
+          path: ${{ runner.temp }}/probe-tasks
+      - name: Resolve latest Globalping CLI
+        id: cli
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CLI_VERSION=$(gh release view --repo jsdelivr/globalping-cli --json tagName --jq .tagName)
+          echo "version=$CLI_VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        id: cli-cache
+        with:
+          path: probe/bin
+          key: globalping-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.cli.outputs.version }}
+      - name: Download Globalping CLI
+        if: steps.cli-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_VERSION: ${{ steps.cli.outputs.version }}
+        run: |
+          gh release download "$CLI_VERSION" --repo jsdelivr/globalping-cli --pattern globalping_Linux_x86_64.tar.gz --output "$RUNNER_TEMP/globalping.tar.gz"
+          tar -xzf "$RUNNER_TEMP/globalping.tar.gz" -C "$RUNNER_TEMP" globalping
+          install -D -m 755 "$RUNNER_TEMP/globalping" probe/bin/globalping-cli
+      - name: Enable Globalping CLI
+        run: |
+          chmod +x probe/bin/globalping-cli
+          echo "$GITHUB_WORKSPACE/probe/bin" >> "$GITHUB_PATH"
+      - name: Execute probe tasks
+        continue-on-error: true
+        env:
+          TASKS_FILE: ${{ inputs.tasks_file }}
+        run: node probe/execute-probe-tasks.mjs "$RUNNER_TEMP/probe-tasks/$TASKS_FILE"
+      - name: Save probe results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.results_artifact }}
+          path: probe/results/*.json
+          if-no-files-found: error

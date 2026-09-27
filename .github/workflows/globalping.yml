@@ -6,6 +6,10 @@ on:
       timezone: Asia/Shanghai
   workflow_dispatch:
     inputs:
+      state_run_id:
+        description: Source Run ID (digits after /actions/runs/); blank starts from zero
+        type: string
+        default: ''
       CN-main:
         description: CN-main
         type: boolean
@@ -24,186 +28,19 @@ on:
         default: 12
         required: true
       max_rounds:
-        description: Maximum probe rounds; additional rounds when history_run_id is set
+        description: Maximum rounds for this task, including its first round
         type: number
         default: 5
         required: true
-      history_run_id:
-        description: Import probe-state; run ID digits only (max_rounds adds more rounds)
-        type: string
-        default: ''
-      previous_run_id:
-        description: Continue with the saved round limit; run ID digits only
-        type: string
-        default: ''
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      matrix: ${{ steps.batches.outputs.matrix }}
-      max_parallel: ${{ steps.batches.outputs.max_parallel }}
-      round: ${{ steps.batches.outputs.round }}
-      has_work: ${{ steps.batches.outputs.has_work }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-      - name: Restore cumulative results
-        if: inputs.previous_run_id != '' || inputs.history_run_id != ''
-        uses: actions/download-artifact@v8
-        with:
-          name: probe-state
-          run-id: ${{ inputs.previous_run_id || inputs.history_run_id }}
-          github-token: ${{ github.token }}
-          path: probe
-      - name: Fetch resources
-        run: node probe/fetch-resource-urls.mjs
-      - name: Prepare batches
-        id: batches
-        env:
-          PROBE_INPUTS: >-
-            ${{ github.event_name == 'schedule' && '{"CN-main":true,"CN-aroung":true,"global-main":true,"max_parallel":12,"max_rounds":5}' || toJSON(inputs) }}
-        run: node probe/prepare-probe-batches.mjs
-      - name: Resolve latest Globalping CLI
-        id: cli
-        if: steps.batches.outputs.has_work == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          CLI_VERSION=$(gh release view --repo jsdelivr/globalping-cli --json tagName --jq .tagName)
-          echo "version=$CLI_VERSION" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
-        id: cli-cache
-        if: steps.batches.outputs.has_work == 'true'
-        with:
-          path: probe/bin
-          key: globalping-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.cli.outputs.version }}
-      - name: Download Globalping CLI
-        if: steps.batches.outputs.has_work == 'true' && steps.cli-cache.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CLI_VERSION: ${{ steps.cli.outputs.version }}
-        run: |
-          gh release download "$CLI_VERSION" --repo jsdelivr/globalping-cli --pattern globalping_Linux_x86_64.tar.gz --output "$RUNNER_TEMP/globalping.tar.gz"
-          tar -xzf "$RUNNER_TEMP/globalping.tar.gz" -C "$RUNNER_TEMP" globalping
-          install -D -m 755 "$RUNNER_TEMP/globalping" probe/bin/globalping-cli
-      - uses: actions/upload-artifact@v7
-        with:
-          name: probe-inputs
-          path: |
-            probe/resources/*.json
-            probe/bin/globalping-cli
-          if-no-files-found: error
-
-  probe:
-    needs: prepare
-    if: needs.prepare.outputs.has_work == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ fromJSON(needs.prepare.outputs.max_parallel) }}
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-      - uses: actions/download-artifact@v8
-        with:
-          name: probe-inputs
-          path: probe
-      - name: Enable Globalping CLI
-        run: |
-          chmod +x probe/bin/globalping-cli
-          echo "$GITHUB_WORKSPACE/probe/bin" >> "$GITHUB_PATH"
-      - name: Probe resource batch
-        continue-on-error: true
-        env:
-          BATCH_ID: ${{ matrix.batch }}
-        run: node probe/probe-resource-batch.mjs "$BATCH_ID"
-      - uses: actions/upload-artifact@v7
-        if: ${{ !cancelled() }}
-        with:
-          name: probe-results-${{ matrix.batch }}
-          path: probe/results/*.json
-
-  collect:
-    needs: [prepare, probe]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-      - name: Restore cumulative results
-        if: inputs.previous_run_id != '' || inputs.history_run_id != ''
-        uses: actions/download-artifact@v8
-        with:
-          name: probe-state
-          run-id: ${{ inputs.previous_run_id || inputs.history_run_id }}
-          github-token: ${{ github.token }}
-          path: probe
-      - uses: actions/download-artifact@v8
-        with:
-          name: probe-inputs
-          path: probe
-      - name: Collect all probe results
-        if: needs.prepare.outputs.has_work == 'true'
-        uses: actions/download-artifact@v8
-        with:
-          pattern: probe-results-*
-          path: probe/collected-results/round-${{ needs.prepare.outputs.round }}
-      - name: Complete probe round
-        id: round
-        run: node probe/complete-probe-round.mjs
-      - name: Save cumulative probe state
-        uses: actions/upload-artifact@v7
-        with:
-          name: probe-state
-          path: |
-            probe/resources/*.json
-            probe/collected-results/**/*.json
-            probe/rounds/*.json
-          if-no-files-found: error
-      - name: Start next round
-        if: steps.round.outputs.continue == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          NEXT_ROUND: ${{ steps.round.outputs.next_round }}
-        run: gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/globalping.yml/dispatches" --input - <<< "$NEXT_ROUND"
-      - name: Summarize probe results
-        if: steps.round.outputs.continue == 'false'
-        run: node probe/summarize-probe-results.mjs
-      - name: Show overview
-        if: steps.round.outputs.continue == 'false'
-        run: cat probe/summary/overview.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Show round progress
-        if: steps.round.outputs.continue == 'false'
-        run: cat probe/summary/rounds.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Show missing resources by city
-        if: steps.round.outputs.continue == 'false'
-        run: cat probe/summary/missing-cities.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Show missing cities by resource
-        if: steps.round.outputs.continue == 'false'
-        run: cat probe/summary/missing-resources.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Show Cloudflare colos
-        if: steps.round.outputs.continue == 'false'
-        run: cat probe/summary/colos.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Show probe sources
-        if: steps.round.outputs.continue == 'false'
-        run: cat probe/summary/sources.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Show probe runners
-        if: steps.round.outputs.continue == 'false'
-        run: cat probe/summary/runners.md >> "$GITHUB_STEP_SUMMARY"
+  execute:
+    uses: ./.github/workflows/execute-probe-plan.yml
+    with:
+      state_run_id: ${{ inputs.state_run_id || '' }}
+      definition: probe/plans/globalping.mjs
+      settings: ${{ toJSON(inputs) }}

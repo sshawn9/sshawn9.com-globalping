@@ -5,17 +5,23 @@ import { promisify } from 'node:util';
 import { probeResource } from './probe-resource.mjs';
 
 async function main() {
-  if (process.argv.length !== 3) throw new Error('Usage: node probe/probe-resource-batch.mjs <batch-id>');
-  const plan = JSON.parse(await readFile(new URL('./resources/probe-batches.json', import.meta.url), 'utf8'));
-  const batch = plan.batches.find((batch) => batch.id === Number(process.argv[2]));
-  if (!batch) throw new Error('Batch not found.');
+  if (process.argv.length !== 3) throw new Error('Usage: node probe/execute-probe-tasks.mjs <tasks.json>');
+  const tasks = JSON.parse(await readFile(process.argv[2], 'utf8'));
+  if (!Array.isArray(tasks) || tasks.length === 0) throw new Error('The task file must contain a non-empty array.');
+  for (const { url, cities } of tasks) {
+    if (typeof url !== 'string' || !['http:', 'https:'].includes(new URL(url).protocol)) {
+      throw new Error('Each task must have an HTTP or HTTPS URL.');
+    }
+    if (!Array.isArray(cities) || cities.length === 0 ||
+      cities.some((city) => typeof city !== 'string' || !/^[A-Z]{2}\+[^,\r\n\0]+$/.test(city))) {
+      throw new Error('Each task must have a non-empty cities array, e.g. ["CN+Shanghai"].');
+    }
+  }
 
   const stats = {
-    round: plan.round,
-    batch_id: batch.id,
     public_ip: null,
     available_quota: null,
-    assigned_resources: batch.urls.length,
+    assigned_resources: tasks.length,
     attempted_resources: 0,
     attempted_records: 0,
   };
@@ -40,21 +46,23 @@ async function main() {
   stats.available_quota = Number(remaining[1]);
   await saveStats();
 
-  const resourceLimit = Math.floor(stats.available_quota / plan.cities.length);
-  for (const url of batch.urls.slice(0, resourceLimit)) {
+  for (const { url, cities } of tasks) {
+    const probeCities = cities.slice(0, stats.available_quota - stats.attempted_records);
+    if (probeCities.length === 0) break;
     stats.attempted_resources += 1;
-    for (let start = 0; start < plan.cities.length; start += 5) {
-      const cities = plan.cities.slice(start, start + 5);
-      stats.attempted_records += cities.length;
+    for (let start = 0; start < probeCities.length; start += 5) {
+      const group = probeCities.slice(start, start + 5);
+      stats.attempted_records += group.length;
       await saveStats();
       try {
-        await probeResource(url, cities);
+        await probeResource(url, group);
       } catch (error) {
-        console.error(`${url} [${cities.join(',')}]: ${error.message}`);
+        console.error(`${url} [${group.join(',')}]: ${error.message}`);
         process.exitCode = 1;
       }
     }
   }
+  console.log(`Attempted ${stats.attempted_resources}/${stats.assigned_resources} tasks, ${stats.attempted_records} probe records.`);
 }
 
 main().catch((error) => {

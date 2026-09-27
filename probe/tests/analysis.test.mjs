@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { analyzeProbeResults, timingSummary } from '../analyze-probe-results.mjs';
 import { renderProbeSummary } from '../summarize-probe-results.mjs';
+import { writeTaskPlan } from '../probe-state.mjs';
 
 const A = 'https://example.com/shared.css?v=1';
 const B = 'https://example.com/shared.css?v=2';
@@ -15,7 +16,6 @@ const D = 'https://example.com/new.js';
 const SH = 'CN+Shanghai';
 const TK = 'JP+Tokyo';
 const SG = 'SG+Singapore';
-const inputs = { 'CN-main': true, max_parallel: 12, max_rounds: 2 };
 const components = [
   { id: 'asia', name: 'Asia', group: true },
   { name: 'Tokyo, Japan - (NRT)', group_id: 'asia' },
@@ -42,17 +42,18 @@ async function fixture(t) {
     await writeFile(file, JSON.stringify(value, null, 2) + '\n');
     return file;
   };
-  const runnerPath = (round, batch, flat = false) => `collected-results/round-${round}${flat ? '' : `/probe-results-${batch}`}`;
+  const runnerPath = (round, batch) => `collected-results/round-${round}/probe-results-${batch}`;
   return { path, directory, save,
-    plan: (round, urls, cities, batches) => save(`rounds/round-${round}.json`, { inputs, round, urls, cities,
-      batches: batches.map((urls, index) => ({ id: index + 1, urls })) }),
-    stats: (round, batch, assigned, attemptedResources, attemptedRecords, { flat = false, quota = 250 } = {}) => save(
-      `${runnerPath(round, batch, flat)}/probe-stats.json`, { round, batch_id: batch,
-        public_ip: '203.0.113.10', available_quota: quota, assigned_resources: assigned,
+    targets: (urls, cities) => save('targets.json', urls.map((url) => ({ url, cities }))),
+    plan: (round, urls, cities, batches) => save(`rounds/round-${round}.json`, { strategy: 'pending-pairs', round,
+      targets: urls.map((url) => ({ url, cities })),
+      batches: batches.map((urls, index) => ({ id: index + 1, urls, tasks_file: `tasks/round-${round}/batch-${index + 1}.json` })) }),
+    stats: (round, batch, assigned, attemptedResources, attemptedRecords, { quota = 250 } = {}) => save(
+      `${runnerPath(round, batch)}/probe-stats.json`, { public_ip: '203.0.113.10', available_quota: quota, assigned_resources: assigned,
         attempted_resources: attemptedResources, attempted_records: attemptedRecords }),
-    result: (round, batch, name, url, results, flat = false) => {
+    result: (round, batch, name, url, results) => {
       const target = new URL(url);
-      return save(`${runnerPath(round, batch, flat)}/${name}.json`, {
+      return save(`${runnerPath(round, batch)}/${name}.json`, {
         target: target.hostname, measurementOptions: { protocol: 'HTTPS',
           request: { path: target.pathname, query: target.search.slice(1) } }, results,
       });
@@ -63,40 +64,40 @@ async function fixture(t) {
 async function multipleRounds(t) {
   const f = await fixture(t);
   const cities = [SH, TK, SG];
-  // One batch per round: download-artifact puts its files directly in the round directory.
+  await f.targets([A, B, D], cities);
   await f.plan(1, [A, B, C], cities, [[A, B, C]]);
-  await f.stats(1, 1, 3, 3, 9, { flat: true });
-  await f.result(1, 1, 'a', A, [record(SH, 1, 200, 'HIT', 'NRT', 10, 1), record(TK, 1, 200, 'MISS', 'NRT', 20, 2), record(SG, 3, 200, 'MISS', 'SIN', 30, 3)], true);
-  await f.result(1, 1, 'b', B, [record(SH, 1, 404, 'HIT', 'LAX', 40, 4), record(TK, 1, null, null, null, -1, null), record(SG, 3, 200, 'HIT', 'SIN', 50, 5)], true);
+  await f.stats(1, 1, 3, 3, 9);
+  await f.result(1, 1, 'a', A, [record(SH, 1, 200, 'HIT', 'NRT', 10, 1), record(TK, 1, 200, 'MISS', 'NRT', 20, 2), record(SG, 3, 200, 'MISS', 'SIN', 30, 3)]);
+  await f.result(1, 1, 'b', B, [record(SH, 1, 404, 'HIT', 'LAX', 40, 4), record(TK, 1, null, null, null, -1, null), record(SG, 3, 200, 'HIT', 'SIN', 50, 5)]);
   // C's CLI call failed without JSON; all three attempts were recorded.
   // The next deployment removes C and adds D. A and B still need probing.
   await f.plan(2, [A, B, D], cities, [[A, B, D]]);
-  // Eight remaining tests cover only A and B; D is assigned but never attempted.
-  await f.stats(2, 1, 3, 2, 6, { flat: true, quota: 8 });
-  await f.result(2, 1, 'a', A, [record(SH, 1, 200, 'hit', 'NRT', 60, 6), record(TK, 1, 200, 'HIT', 'NRT', 70, 7), record(SG, 3, 200, 'HIT', 'SIN', 80, 8)], true);
-  await f.result(2, 1, 'b', B, [record(SH, 9, 200, 'HIT', 'ZZZ', 90, 9), record(TK, 1, 200, 'HIT', 'NRT', 100, 10), record(SG, 3, 200, 'MISS', 'SIN', 110, 11)], true);
+  // A and B use six attempts; D is assigned but never attempted.
+  await f.stats(2, 1, 3, 2, 6, { quota: 8 });
+  await f.result(2, 1, 'a', A, [record(SH, 1, 200, 'hit', 'NRT', 60, 6), record(TK, 1, 200, 'HIT', 'NRT', 70, 7), record(SG, 3, 200, 'HIT', 'SIN', 80, 8)]);
+  await f.result(2, 1, 'b', B, [record(SH, 9, 200, 'HIT', 'ZZZ', 90, 9), record(TK, 1, 200, 'HIT', 'NRT', 100, 10), record(SG, 3, 200, 'MISS', 'SIN', 110, 11)]);
   return f;
 }
 
-test('counts repeated HIT records across rounds without losing failed or retired resources', async (t) => {
+test('counts repeated HIT records and failed attempts while excluding retired targets', async (t) => {
   const f = await multipleRounds(t);
   const report = await analyzeProbeResults(f.directory);
-  assert.equal(report.overview.resourceCount, 4);
+  assert.equal(report.overview.resourceCount, 3);
   assert.equal(report.overview.cityCount, 3);
-  assert.equal(report.overview.attemptedResources, 3);
+  assert.equal(report.overview.attemptedResources, 2);
   assert.equal(report.overview.attemptedRecords, 15);
   assert.equal(report.overview.hitRecords, 7);
   assert.equal(report.overview.hitCityPairs, 6);
-  assert.equal(report.overview.totalCityPairs, 12);
+  assert.equal(report.overview.totalCityPairs, 9);
   assert.deepEqual(report.rounds.map((r) => [r.attemptedResources, r.attemptedRecords, r.newCityPairs, r.newColoPairs, r.cumulativeCityPairs]),
     [[3, 9, 2, 2, 2], [2, 6, 4, 3, 6]]);
   assert.deepEqual(report.runners.map((r) => [r.id, r.attemptedRecords, r.hitRecords]), [['1/1', 9, 2], ['2/1', 6, 5]]);
   assert.deepEqual(report.resources.find((r) => r.url === A).misses, []);
   // The later MISS in Singapore must not erase B's first-round HIT.
   assert.deepEqual(report.resources.find((r) => r.url === B).misses, []);
-  assert.deepEqual(report.resources.find((r) => r.url === C).misses, [SH, TK, SG]);
+  assert.equal(report.resources.some((r) => r.url === C), false);
   assert.deepEqual(report.resources.find((r) => r.url === D).misses, [SH, TK, SG]);
-  assert.deepEqual(report.cities.map((c) => [c.city, c.misses.length]), [[SH, 2], [TK, 2], [SG, 2]]);
+  assert.deepEqual(report.cities.map((c) => [c.city, c.misses.length]), [[SH, 1], [TK, 1], [SG, 1]]);
 });
 
 test('groups by city and ASN, excludes invalid timings, and only lists reached colos', async (t) => {
@@ -129,29 +130,11 @@ test('groups by city and ASN, excludes invalid timings, and only lists reached c
   assert.doesNotMatch(sections['missing-resources'], /shared\.css\?v=[12]/);
 });
 
-test('missing runner stats make attempts unknown without discarding returned measurements', async (t) => {
-  const f = await fixture(t);
-  await f.plan(1, [A, B], [SH], [[A], [B]]);
-  await f.stats(1, 1, 1, 1, 1);
-  await f.result(1, 1, 'a', A, [record(SH, 1, 200, 'HIT', 'NRT')]);
-  await f.result(1, 2, 'b', B, [record(SH, 1, 200, 'HIT', 'NRT')]);
-  const report = await analyzeProbeResults(f.directory);
-  assert.equal(report.overview.attemptedRecords, null);
-  assert.equal(report.overview.knownAttemptedRecords, 1);
-  assert.equal(report.overview.hitRecords, 2);
-  assert.deepEqual(report.overview.missingRunnerStats, ['1/2']);
-  assert.equal(report.runners[1].hitRecords, null);
-  const summary = renderProbeSummary(report, components);
-  assert.match(summary.overview, /Incomplete runner statistics/);
-  assert.match(summary.overview, /2\/— \(—\)/);
-  assert.match(summary['missing-cities'], /All resources hit/);
-  assert.match(summary['missing-resources'], /All cities hit/);
-});
-
 test('a runner with no quota contributes zero attempts and leaves its resource uncovered', async (t) => {
   const f = await fixture(t);
+  await f.targets([A], [SH]);
   await f.plan(1, [A], [SH], [[A]]);
-  await f.stats(1, 1, 1, 0, 0, { flat: true, quota: 0 });
+  await f.stats(1, 1, 1, 0, 0, { quota: 0 });
   const report = await analyzeProbeResults(f.directory);
   assert.equal(report.overview.attemptedResources, 0);
   assert.equal(report.overview.attemptedRecords, 0);
@@ -168,49 +151,80 @@ test('computes median and nearest-rank P95 using only finite nonnegative samples
   assert.deepEqual(timingSummary(Array.from({ length: 20 }, (_, i) => i + 1)), { n: 20, p50: 10.5, p95: 19 });
 });
 
-test('writes complete and per-section Markdown plus the original location response', async (t) => {
+test('analyzes an external state without modifying it and writes Markdown even when location lookup fails', async (t) => {
   const f = await multipleRounds(t);
+  const app = await fixture(t);
+  const snapshot = async () => Promise.all((await readdir(f.path, { recursive: true })).filter((file) => file.endsWith('.json')).sort()
+    .map(async (file) => [file, await readFile(join(f.path, file))]));
+  const original = await snapshot();
   const source = fileURLToPath(new URL('../', import.meta.url));
-  for (const file of (await readdir(source)).filter((file) => file.endsWith('.mjs'))) await cp(join(source, file), join(f.path, file));
-  await mkdir(join(f.path, 'resources'));
+  for (const file of (await readdir(source)).filter((file) => file.endsWith('.mjs'))) await cp(join(source, file), join(app.path, file));
   const rawLocations = JSON.stringify({ components });
-  const mock = join(f.path, 'mock-fetch.mjs');
+  const mock = join(app.path, 'mock-fetch.mjs');
   await writeFile(mock, `globalThis.fetch = async (url) => {
     if (url !== 'https://www.cloudflarestatus.com/api/v2/components.json') throw new Error('Unexpected request');
     return new Response(${JSON.stringify(rawLocations)});
   };`);
-  execFileSync(process.execPath, ['--import', mock, join(f.path, 'summarize-probe-results.mjs')], { stdio: 'pipe' });
-  assert.equal(await readFile(join(f.path, 'resources/cloudflare-components.json'), 'utf8'), rawLocations);
-  const full = await readFile(join(f.path, 'probe-summary.md'), 'utf8');
+  const command = ['--import', mock, join(app.path, 'summarize-probe-results.mjs'), f.path];
+  execFileSync(process.execPath, command, { stdio: 'pipe' });
+  assert.equal(await readFile(join(app.path, 'resources/cloudflare-components.json'), 'utf8'), rawLocations);
+  const full = await readFile(join(app.path, 'summary/probe-summary.md'), 'utf8');
   assert.match(full, /7\/15 \(46\.67%\)/);
   const cityTable = full.indexOf('## MISS by city');
   const resourceTable = full.indexOf('## MISS by resource');
   assert.ok(cityTable >= 0 && resourceTable > cityTable);
   await writeFile(mock, 'globalThis.fetch = async () => { throw new Error("Offline"); };');
-  execFileSync(process.execPath, ['--import', mock, join(f.path, 'summarize-probe-results.mjs')], { stdio: 'pipe' });
-  const colos = await readFile(join(f.path, 'summary/colos.md'), 'utf8');
+  execFileSync(process.execPath, command, { stdio: 'pipe' });
+  const colos = await readFile(join(app.path, 'summary/colos.md'), 'utf8');
   assert.match(colos, /NRT/);
   assert.match(colos, /location lookup failed: Offline/);
+  assert.deepEqual(await snapshot(), original);
 });
 
-test('keeps coverage tied to all task targets while recording responses from other cities', async (t) => {
+test('attributes current-format records to runners and respects per-resource target cities', async (t) => {
   const f = await fixture(t);
+  await f.targets([A], [SH]);
   await f.plan(1, [A], [SH], [[A]]);
   await f.stats(1, 1, 1, 1, 1);
+  // A's response comes from a city targeted only for other resources.
   await f.result(1, 1, 'outside-city', A, [record(TK, 2, 200, 'HIT', 'NRT')]);
-  const report = await analyzeProbeResults(f.directory);
-  assert.equal(report.overview.hitRecords, 1);
-  assert.equal(report.overview.cityCount, 1);
-  assert.equal(report.overview.totalCityPairs, 1);
-  assert.equal(report.overview.hitCityPairs, 0);
-  assert.deepEqual(report.resources[0].misses, [SH]);
-  assert.equal(report.sources[0].city, TK);
+  const targets = [{ url: A, cities: [SH] }, { url: B, cities: [TK] }, { url: C, cities: [TK, SG] }];
+  await f.save('targets.json', targets);
+  await writeTaskPlan(f.path, { round: 2,
+    strategy: 'pending-pairs', targets, tasks: targets });
+  await f.save('collected-results/round-2/probe-results-1/probe-stats.json', {
+    public_ip: '203.0.113.20', available_quota: 250, assigned_resources: 3,
+    attempted_resources: 3, attempted_records: 4,
+  });
+  await f.result(2, 1, 'a', A, [record(SH, 1, 200, 'HIT', 'NRT')]);
+  await f.result(2, 1, 'b', B, [record(TK, 2, 404, 'HIT', 'NRT')]);
+  // C returns no JSON; both of its attempts still count.
+  await f.save('rounds/metadata.json', { additional: 'not a task plan' });
+  const report = await analyzeProbeResults(f.path);
+  assert.equal(report.overview.hitRecords, 2);
+  assert.equal(report.overview.attemptedRecords, 5);
+  assert.equal(report.overview.totalCityPairs, 4);
+  assert.equal(report.overview.hitCityPairs, 1);
+  assert.deepEqual(report.runners.map((runner) => [runner.id, runner.attemptedRecords, runner.hitRecords]),
+    [['1/1', 1, 1], ['2/1', 4, 1]]);
+  assert.deepEqual(report.rounds.map((round) => [round.newCityPairs, round.cumulativeCityPairs]), [[0, 0], [1, 1]]);
+  assert.deepEqual(report.resources.map((resource) => [resource.url, resource.cityCount, resource.misses]),
+    [[C, 2, [TK, SG]], [A, 1, []], [B, 1, [TK]]]);
+  assert.deepEqual(report.cities.map((city) => [city.city, city.resourceCount, city.misses.length]),
+    [[SH, 1, 0], [TK, 2, 2], [SG, 1, 1]]);
+  const sections = renderProbeSummary(report, components);
+  assert.match(sections.overview, /1\/4 \(25\.00%\)/);
+  assert.match(sections.overview, /\| Rounds \| 2 \|/);
+  assert.match(sections['missing-cities'], /\| JP\+Tokyo \| 2\/2 \|/);
+  assert.match(sections['missing-resources'], /<code>https:\/\/example\.com\/failed\.js<\/code> \| 2\/2 \|/);
+  assert.equal(report.sources.find((source) => source.city === TK).hits, 1);
   assert.equal(report.colos[0].hits, 1);
 });
 
 test('preserves table columns and resource link destinations containing delimiters', async (t) => {
   const f = await fixture(t);
   const url = 'https://example.com/a|b.js?x=1&y=2';
+  await f.targets([url], [SH]);
   await f.plan(1, [url], [SH], [[url]]);
   await f.stats(1, 1, 1, 1, 1);
   const result = record(SH, 1, 200, 'MISS', 'NRT');
@@ -226,4 +240,29 @@ test('preserves table columns and resource link destinations containing delimite
   const link = /^\[R\d+\]:\s*<?([^>\s]+)>?$/m.exec(sections['missing-cities']);
   assert.ok(link, 'Missing resource URL link');
   assert.equal(decodeURI(link[1]), url);
+});
+
+test('coverage follows current targets while probe-record statistics retain the full history', async (t) => {
+  const f = await multipleRounds(t);
+  await f.save('targets.json', [{ url: A, cities: [SH] }, { url: D, cities: [TK] }]);
+  const report = await analyzeProbeResults(f.directory);
+  assert.equal(report.overview.totalCityPairs, 2);
+  assert.equal(report.overview.hitCityPairs, 1);
+  assert.equal(report.overview.attemptedResources, 1);
+  assert.equal(report.overview.attemptedRecords, 15);
+  assert.equal(report.overview.hitRecords, 7);
+  assert.deepEqual(report.resources.map(({ url, misses }) => [url, misses]), [[D, [TK]], [A, []]]);
+  const summary = renderProbeSummary(report);
+  assert.match(summary.overview, /Probe record statistics include all saved rounds/);
+  assert.doesNotMatch(summary['missing-resources'], /failed\.js|shared\.css/);
+});
+
+test('initialized targets can be analyzed before any probe round exists', async (t) => {
+  const f = await fixture(t);
+  await f.save('targets.json', [{ url: A, cities: [SH, TK] }]);
+  const report = await analyzeProbeResults(f.directory);
+  assert.equal(report.overview.roundCount, 0);
+  assert.equal(report.overview.attemptedRecords, 0);
+  assert.equal(report.overview.totalCityPairs, 2);
+  assert.deepEqual(report.resources[0].misses, [SH, TK]);
 });

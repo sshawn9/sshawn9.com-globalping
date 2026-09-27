@@ -1,0 +1,19 @@
+name: Continue Globalping
+
+on:
+  workflow_dispatch:
+    inputs:
+      state_run_id:
+        description: Run ID containing the probe-state to continue
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  execute:
+    uses: ./.github/workflows/execute-probe-plan.yml
+    with:
+      state_run_id: ${{ inputs.state_run_id }}

@@ -1,0 +1,134 @@
+name: Execute probe plan
+
+on:
+  workflow_call:
+    inputs:
+      state_run_id:
+        type: string
+        default: ''
+      definition:
+        description: Repository path to the new task definition; blank resumes saved state
+        type: string
+        default: ''
+      settings:
+        description: New task settings as JSON; continuation uses the saved plan
+        type: string
+        default: '{}'
+    outputs:
+      state_run_id:
+        description: Run containing the output state
+        value: ${{ jobs.finish.outputs.state_run_id }}
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      round: ${{ steps.plan.outputs.round }}
+      max_parallel: ${{ steps.plan.outputs.max_parallel }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Restore state and prepare the next task
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROBE_REQUEST: ${{ toJSON(inputs) }}
+        run: node probe/prepare-probe-plan.mjs "$RUNNER_TEMP/probe-state"
+      - name: Save prepared state
+        uses: actions/upload-artifact@v7
+        with:
+          name: prepared-state
+          path: ${{ runner.temp }}/probe-state/
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Save runner tasks
+        if: steps.plan.outputs.has_work == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: probe-tasks
+          path: ${{ runner.temp }}/probe-state/tasks/round-${{ steps.plan.outputs.round }}/
+          if-no-files-found: error
+
+  probe:
+    needs: prepare
+    if: needs.prepare.outputs.has_work == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.max_parallel) }}
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    uses: ./.github/workflows/probe-runner.yml
+    with:
+      tasks_artifact: probe-tasks
+      tasks_file: batch-${{ matrix.batch }}.json
+      results_artifact: probe-results-${{ matrix.batch }}
+
+  finish:
+    needs: [prepare, probe]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.probe.result == 'success' || needs.probe.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    outputs:
+      state_run_id: ${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v8
+        with:
+          name: prepared-state
+          path: ${{ runner.temp }}/probe-state
+      - name: Download runner results
+        if: needs.prepare.outputs.has_work == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: probe-results-*
+          path: ${{ runner.temp }}/probe-results
+          merge-multiple: false
+      - name: Collect results and advance the plan
+        id: finish
+        env:
+          PROBE_ROUND: ${{ needs.prepare.outputs.round }}
+        run: node probe/finish-probe-plan.mjs "$RUNNER_TEMP/probe-state" "$RUNNER_TEMP/probe-results" "$RUNNER_TEMP/probe-report"
+      - name: Save complete state
+        if: ${{ !cancelled() && steps.finish.outputs.state_ready == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: probe-state
+          path: ${{ runner.temp }}/probe-state/
+          include-hidden-files: true
+          overwrite: true
+          if-no-files-found: error
+      - name: Show overview
+        if: steps.finish.outputs.analyzed == 'true'
+        run: cat "$RUNNER_TEMP/probe-report/overview.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Show round progress
+        if: steps.finish.outputs.analyzed == 'true'
+        run: cat "$RUNNER_TEMP/probe-report/rounds.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Show missing resources by city
+        if: steps.finish.outputs.analyzed == 'true'
+        run: cat "$RUNNER_TEMP/probe-report/missing-cities.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Show missing cities by resource
+        if: steps.finish.outputs.analyzed == 'true'
+        run: cat "$RUNNER_TEMP/probe-report/missing-resources.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Show Cloudflare colos
+        if: steps.finish.outputs.analyzed == 'true'
+        run: cat "$RUNNER_TEMP/probe-report/colos.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Show probe sources
+        if: steps.finish.outputs.analyzed == 'true'
+        run: cat "$RUNNER_TEMP/probe-report/sources.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Show probe runners
+        if: steps.finish.outputs.analyzed == 'true'
+        run: cat "$RUNNER_TEMP/probe-report/runners.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Start the next task
+        if: steps.finish.outputs.continue == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run continue-globalping.yml --ref "$GITHUB_REF_NAME" --raw-field "state_run_id=$GITHUB_RUN_ID"

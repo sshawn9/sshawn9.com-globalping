@@ -48,3 +48,15 @@ export async function* readMeasurements(directory = new URL('./collected-results
     };
   }
 }
+
+export async function readProbeHits(directory) {
+  const hits = new Map();
+  for await (const { url, records } of readMeasurements(directory)) {
+    for (const record of records) {
+      if (!record.hit || !record.city) continue;
+      if (!hits.has(url)) hits.set(url, new Set());
+      hits.get(url).add(record.city);
+    }
+  }
+  return hits;
+}

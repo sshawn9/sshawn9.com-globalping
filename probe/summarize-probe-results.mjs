@@ -1,4 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { analyzeProbeResults } from './analyze-probe-results.mjs';
 
 const escape = (value) => String(value ?? '—').replace(/[&<>|\r\n`*_[\]\\]/g, (char) => ({
@@ -6,9 +8,8 @@ const escape = (value) => String(value ?? '—').replace(/[&<>|\r\n`*_[\]\\]/g, 
   '`': '&#96;', '*': '&#42;', '_': '&#95;', '[': '&#91;', ']': '&#93;', '\\': '&#92;',
 })[char]);
 const list = (values) => values.length ? values.map(escape).join(', ') : '—';
-const percent = (hits, total) => hits !== null && total > 0 ? `${(hits / total * 100).toFixed(2)}%` : '—';
-const ratio = (hits, total) => `${hits ?? '—'}/${total ?? '—'} (${percent(hits, total)})`;
-const count = (value, known) => value ?? `≥ ${known} (incomplete)`;
+const percent = (hits, total) => total > 0 ? `${(hits / total * 100).toFixed(2)}%` : '—';
+const ratio = (hits, total) => `${hits}/${total} (${percent(hits, total)})`;
 const gain = (value, attempts) => attempts > 0 ? (value / attempts * 100).toFixed(2) : '—';
 const timing = ({ n, p50, p95 }) => n ? `${p50.toFixed(1)} / ${p95.toFixed(1)} (n=${n})` : '—';
 
@@ -35,31 +36,31 @@ export function renderProbeSummary(report, components = []) {
   const resourceMisses = report.resources.filter((resource) => resource.misses.length)
     .sort((a, b) => b.misses.length - a.misses.length || a.url.localeCompare(b.url));
   return {
-    overview: '# Globalping probe results\n\n' + table('Overview', ['Metric', 'Value'], [
-      ['Resources: attempted / total', `${count(o.attemptedResources, o.knownAttemptedResources)} / ${o.resourceCount}`],
-      ['Cities / selected groups', `${o.cityCount} / ${list(o.groups)}`],
-      ['Rounds / limit', `${o.roundCount} / ${o.maxRounds}`],
+    overview: '# Globalping probe results\n\n' +
+      'Coverage uses the current targets. Probe record statistics include all saved rounds.\n\n' + table('Overview', ['Metric', 'Value'], [
+      ['Target resources: attempted / total', `${o.attemptedResources} / ${o.resourceCount}`],
+      ['Target cities', o.cityCount],
+      ['Rounds', o.roundCount],
       ['Probe runners / reached colos', `${o.runnerCount} / ${o.coloCount}`],
       ['HIT records / attempts', ratio(o.hitRecords, o.attemptedRecords)],
       ['HIT resource × city pairs / total', ratio(o.hitCityPairs, o.totalCityPairs)],
-    ]) + (o.missingRunnerStats.length
-      ? `\n**Incomplete runner statistics:** ${list(o.missingRunnerStats)}. Known attempts: ${o.knownAttemptedRecords}.\n`
-      : ''),
+    ]),
     rounds: table('Rounds', ['Round', 'Resources attempted', 'Attempts', 'New city pairs', 'New colo pairs',
       'Cumulative city coverage', 'New pairs per 100 attempts: city / colo'], report.rounds.map((round) => [
-      round.round, count(round.attemptedResources, round.knownAttemptedResources),
-      count(round.attemptedRecords, round.knownAttemptedRecords), round.newCityPairs, round.newColoPairs,
+      round.round, round.attemptedResources,
+      round.attemptedRecords, round.newCityPairs, round.newColoPairs,
       ratio(round.cumulativeCityPairs, o.totalCityPairs),
       `${gain(round.newCityPairs, round.attemptedRecords)} / ${gain(round.newColoPairs, round.attemptedRecords)}`,
     ])),
     'missing-cities': table('MISS by city', ['City', 'MISS resources / total', 'Resources'], cityMisses.map((city) => [
-      escape(city.city), `${city.misses.length}/${o.resourceCount}`, city.misses.map((id) => `[${id}]`).join(', '),
-    ]), { empty: 'All resources hit in every city.' }) + (resourceMisses.length
+      escape(city.city), `${city.misses.length}/${city.resourceCount}`, city.misses.map((id) => `[${id}]`).join(', '),
+    ]), { empty: o.totalCityPairs ? 'All resources hit in their target cities.' : 'No target resource-city pairs.' }) + (resourceMisses.length
       ? '\n' + resourceMisses.map(({ id, url }) => `[${id}]: <${url.replace(/\|/g, '%7C')}>`).join('\n') + '\n'
       : ''),
     'missing-resources': table('MISS by resource', ['Resource', 'Resource URL', 'MISS cities / total', 'Cities'],
       resourceMisses.map((resource) => [resource.id, `<code>${escape(resource.url)}</code>`,
-        `${resource.misses.length}/${o.cityCount}`, list(resource.misses)]), { empty: 'All cities hit for every resource.' }),
+        `${resource.misses.length}/${resource.cityCount}`, list(resource.misses)]),
+      { empty: o.totalCityPairs ? 'All cities hit for their target resources.' : 'No target resource-city pairs.' }),
     colos: table('Cloudflare colos', ['Colo', 'Location / region', 'HIT resources / observed', 'Source cities', 'Sources'],
       report.colos.map((colo) => {
         const location = locations.get(colo.code);
@@ -77,8 +78,8 @@ export function renderProbeSummary(report, components = []) {
   };
 }
 
-async function main() {
-  const report = await analyzeProbeResults();
+export async function summarizeProbeResults(stateDirectory, outputDirectory = new URL('./summary/', import.meta.url)) {
+  const report = await analyzeProbeResults(stateDirectory);
   let components = [];
   let locationError = '';
   if (report.colos.length) {
@@ -92,6 +93,7 @@ async function main() {
       const data = JSON.parse(raw);
       if (!Array.isArray(data.components)) throw new Error('Invalid components response.');
       components = data.components;
+      await mkdir(new URL('./resources/', import.meta.url), { recursive: true });
       await writeFile(new URL('./resources/cloudflare-components.json', import.meta.url), raw);
     } catch (error) {
       locationError = `Cloudflare location lookup failed: ${error.message}. Colo codes are still included.`;
@@ -100,20 +102,23 @@ async function main() {
   }
   const sections = renderProbeSummary(report, components);
   if (locationError) sections.colos += `\n${escape(locationError)}\n`;
-  const directory = new URL('./summary/', import.meta.url);
+  const directory = outputDirectory instanceof URL ? fileURLToPath(outputDirectory) : outputDirectory;
   await mkdir(directory, { recursive: true });
-  await writeFile(new URL('./probe-summary.md', import.meta.url), Object.values(sections).join('\n'));
+  await writeFile(join(directory, 'probe-summary.md'), Object.values(sections).join('\n'));
   for (const [name, markdown] of Object.entries(sections)) {
-    await writeFile(new URL(`${name}.md`, directory), markdown);
+    await writeFile(join(directory, `${name}.md`), markdown);
     if (Buffer.byteLength(markdown) > 1024 * 1024) {
-      throw new Error(`Summary section ${name} exceeds GitHub's 1 MiB step limit. Full report saved to probe/probe-summary.md.`);
+      throw new Error(`Summary section ${name} exceeds GitHub's 1 MiB step limit. Full report saved to ${join(directory, 'probe-summary.md')}.`);
     }
   }
   console.log(`Summarized ${report.overview.roundCount} rounds, ${report.overview.resourceCount} resources and ${report.overview.cityCount} cities.`);
 }
 
 if (import.meta.main) {
-  main().catch((error) => {
+  const task = process.argv.length > 3
+    ? Promise.reject(new Error('Usage: node probe/summarize-probe-results.mjs [state-directory]'))
+    : summarizeProbeResults(process.argv[2]);
+  task.catch((error) => {
     console.error(error.message);
     process.exitCode = 1;
   });
